@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
 import { createClient, User } from '@supabase/supabase-js'
 import { Activity, ArrowDownToLine, ArrowUpFromLine, Boxes, Check, ChevronDown, ClipboardList, LayoutDashboard, LogOut, Menu, Package, Plus, RefreshCw, Search, Settings2, ShieldCheck, Truck, Users, X } from 'lucide-react'
 
@@ -17,7 +18,7 @@ const modules = [{id:'produtos',name:'Produtos'},{id:'estoque',name:'Movimentaç
 
 export default function App() {
  const [user,setUser]=useState<User|null>(null), [profile,setProfile]=useState<Profile|null>(null), [permissions,setPermissions]=useState<Permission[]>([])
- const [ready,setReady]=useState(false), [email,setEmail]=useState(''), [password,setPassword]=useState(''), [loginError,setLoginError]=useState('')
+ const [ready,setReady]=useState(false), [email,setEmail]=useState(''), [password,setPassword]=useState(''), [loginError,setLoginError]=useState(''), [authMode,setAuthMode]=useState<'login'|'signup'>('login'), [fullName,setFullName]=useState(''), [authMessage,setAuthMessage]=useState('')
  const [section,setSection]=useState('Visão geral'), [mobileMenu,setMobileMenu]=useState(false), [query,setQuery]=useState('')
  const [products,setProducts]=useState<Product[]>([]), [units,setUnits]=useState<Unit[]>([]), [movements,setMovements]=useState<Movement[]>([])
  const [remittances,setRemittances]=useState<Remittance[]>([]), [items,setItems]=useState<RemittanceItem[]>([]), [selectedRemittance,setSelectedRemittance]=useState<string|null>(null)
@@ -34,7 +35,7 @@ export default function App() {
  const isAdmin=profile?.role==='admin'
  const allowed=(module:string,action:'can_view'|'can_create'|'can_update'|'can_delete'='can_view')=>isAdmin||permissions.some(p=>p.module===module&&p[action])
  const notify=(message:string)=>{setToast(message);window.setTimeout(()=>setToast(''),3200)}
- const load=async(uid:string)=>{
+ const load=async()=>{
   setLoading(true)
   const [p,u,m,r,pr,up]=await Promise.all([
    supabase.from('products').select('*').order('name'),
@@ -59,12 +60,12 @@ export default function App() {
   setProfile(data as Profile)
   const {data:perms}=await supabase.from('user_permissions').select('*').eq('user_id',u.id)
   setPermissions((perms||[]) as Permission[])
-  if(data.active){await load(u.id);setSection('Visão geral')}
+  if(data.active){await load();setSection('Visão geral')}
   setReady(true)
  }
  useEffect(()=>{supabase.auth.getSession().then(({data})=>{if(data.session)void loadProfile(data.session.user);else setReady(true)});const {data:{subscription}}=supabase.auth.onAuthStateChange((_event,session)=>{if(session)void loadProfile(session.user);else{setUser(null);setProfile(null);setPermissions([])}});return()=>subscription.unsubscribe()},[])
- const refresh=()=>user&&void load(user.id)
- const signIn=async(e:React.FormEvent)=>{e.preventDefault();setLoginError('');const {error}=await supabase.auth.signInWithPassword({email:email.trim(),password});if(error)setLoginError('E-mail ou senha inválidos. Confira os dados e tente novamente.')}
+ const refresh=()=>user&&void load()
+ const signIn=async(e:FormEvent)=>{e.preventDefault();setLoginError('');setAuthMessage('');if(authMode==='signup'){const {error}=await supabase.auth.signUp({email:email.trim(),password,options:{data:{full_name:fullName.trim()}}});if(error)setLoginError(error.message);else setAuthMessage('Cadastro recebido. Confirme seu e-mail, se solicitado, e aguarde a liberação do administrador.');return}const {error}=await supabase.auth.signInWithPassword({email:email.trim(),password});if(error)setLoginError('E-mail ou senha inválidos. Confira os dados e tente novamente.')}
  const signOut=()=>supabase.auth.signOut()
  const filteredProducts=useMemo(()=>products.filter(p=>p.active&&[p.name,p.category].join(' ').toLowerCase().includes(query.toLowerCase())),[products,query])
  const productName=(id:string)=>products.find(p=>p.id===id)?.name||'Produto'
@@ -78,10 +79,10 @@ export default function App() {
   const result=editingProduct?await supabase.from('products').update(payload).eq('id',editingProduct.id).select().single():await supabase.from('products').insert({...payload,created_by:user.id}).select().single()
   if(result.error){notify(result.error.message);setLoading(false);return}
   const pid=result.data.id
-  const base=await supabase.from('product_units').upsert({product_id:pid,name:payload.base_unit_name,base_quantity:1,is_base:true},{onConflict:'product_id,name'})
+  const base=editingProduct?await supabase.from('product_units').update({name:payload.base_unit_name,base_quantity:1,is_base:true}).eq('product_id',pid).eq('is_base',true):await supabase.from('product_units').insert({product_id:pid,name:payload.base_unit_name,base_quantity:1,is_base:true})
   const extras=measureForm.filter(x=>x.name.trim()&&Number(x.factor)>0).map(x=>({product_id:pid,name:x.name.trim(),base_quantity:Number(x.factor),is_base:false}))
-  const extraResult=extras.length?await supabase.from('product_units').upsert(extras,{onConflict:'product_id,name'}):{error:null}
-  if(base.error||extraResult.error)notify((base.error||extraResult.error)?.message||'Erro nas medidas');else notify(editingProduct?'Produto atualizado.':'Produto cadastrado.')
+  const extraResult=extras.length?await supabase.from('product_units').upsert(extras,{onConflict:'product_id,name'}):{error:null};const removedUnits=editingProduct?productUnits(pid).filter(u=>!u.is_base&&!extras.some(x=>x.name===u.name)).map(u=>u.id):[];const deleteResult=removedUnits.length?await supabase.from('product_units').delete().in('id',removedUnits):{error:null}
+  if(base.error||extraResult.error||deleteResult.error)notify((base.error||extraResult.error||deleteResult.error)?.message||'Erro nas medidas');else notify(editingProduct?'Produto atualizado.':'Produto cadastrado.')
   setModal(null);setLoading(false);refresh()
  }
  const saveMovement=async(e:React.FormEvent)=>{e.preventDefault();if(!user)return;const p=products.find(x=>x.id===movementForm.product_id),u=units.find(x=>x.id===movementForm.unit_id);if(!p||!u)return
@@ -114,9 +115,8 @@ export default function App() {
  const menuItems=[{name:'Visão geral',icon:LayoutDashboard,mod:'overview'},{name:'Produtos',icon:Package,mod:'produtos'},{name:'Movimentações',icon:ArrowUpFromLine,mod:'estoque'},{name:'Remessas',icon:Truck,mod:'remessas'},{name:'Usuários',icon:Users,mod:'usuarios'}]
  const navItems=menuItems.filter(x=>x.mod==='overview'||allowed(x.mod))
  if(!ready)return <div className="auth-screen"><div className="auth-card">Carregando REP BEER ESTOQUE...</div></div>
- if(!user)return <div className="auth-screen"><form className="auth-card" onSubmit={signIn}><div className="auth-mark"><Boxes size={26}/></div><div className="eyebrow">REP BEER • CONTROLE OPERACIONAL</div><h1 style={{fontFamily:'Manrope',margin:'4px 0'}}>REP BEER ESTOQUE</h1><p style={{color:'#89958c',fontSize:13,marginTop:0}}>Entre com seu acesso autorizado.</p><label>E-mail</label><input required type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="seu@email.com"/><label>Senha</label><input required type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Sua senha"/>{loginError&&<p className="error">{loginError}</p>}<button className="primary" type="submit">Entrar</button><small style={{color:'#9aa49d',textAlign:'center'}}>Acesso criado e liberado pelo administrador.</small></form></div>
+ if(!user)return <div className="auth-screen"><form className="auth-card" onSubmit={signIn}><div className="auth-mark"><Boxes size={26}/></div><div className="eyebrow">REP BEER • CONTROLE OPERACIONAL</div><h1 style={{fontFamily:'Manrope',margin:'4px 0'}}>REP BEER ESTOQUE</h1><p style={{color:'#89958c',fontSize:13,marginTop:0}}>{authMode==='login'?'Entre com seu acesso autorizado.':'Solicite seu acesso ao sistema.'}</p>{authMode==='signup'&&<><label>Nome completo</label><input required value={fullName} onChange={e=>setFullName(e.target.value)} placeholder="Seu nome"/></>}<label>E-mail</label><input required type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="seu@email.com"/><label>Senha</label><input required minLength={8} type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Mínimo de 8 caracteres"/>{loginError&&<p className="error">{loginError}</p>}{authMessage&&<p className="success-message">{authMessage}</p>}<button className="primary" type="submit">{authMode==='login'?'Entrar':'Solicitar acesso'}</button><button type="button" className="link-action auth-switch" onClick={()=>{setAuthMode(authMode==='login'?'signup':'login');setLoginError('');setAuthMessage('')}}>{authMode==='login'?'Ainda não tem cadastro? Solicitar acesso':'Já possui cadastro? Entrar'}</button><small style={{color:'#9aa49d',textAlign:'center'}}>Novas contas precisam ser liberadas pelo administrador.</small></form></div>
  if(!profile||!profile.active)return <div className="auth-screen"><div className="auth-card"><div className="auth-mark"><ShieldCheck size={26}/></div><h2>Acesso aguardando liberação</h2><p style={{color:'#89958c',fontSize:13}}>Sua conta foi identificada, mas ainda não recebeu autorização para usar o REP BEER ESTOQUE. Solicite ao administrador que libere seu acesso.</p><button className="primary" onClick={signOut}>Sair</button></div></div>
- const canSee=navItems.length>1
  return <div className="shell">
   {mobileMenu&&<button className="backdrop" onClick={()=>setMobileMenu(false)} aria-label="Fechar menu"/>}
   <aside className={`sidebar ${mobileMenu?'open':''}`}>
